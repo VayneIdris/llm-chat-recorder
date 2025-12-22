@@ -76,7 +76,7 @@ channel.onmessage = (event) => {
 - ✅ Claude (claude.ai, anthropic.com)
 - ✅ Google Gemini/Bard (gemini.google.com)
 - ✅ DeepSeek Chat (chat.deepseek.com)
-- ✅ Groq (groq.com)
+- ✅ Grok (grok.com)
 - ✅ Kindroid
 - ✅ Most other LLM chat interfaces
 
