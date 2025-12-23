@@ -1,10 +1,10 @@
-// Main content script
+// Main content script - CLEANED & FIXED
 class LLMChatRecorder {
   constructor() {
     this.recording = false;
     this.container = null;
     this.observer = null;
-    this.streamingMessages = new Map(); // div -> {text, lastUpdate, timeoutId}
+    this.streamingMessages = new Map();
     this.broadcastChannel = null;
     this.selectionHint = null;
     
@@ -12,24 +12,85 @@ class LLMChatRecorder {
   }
   
   initialize() {
-    // Create broadcast channel
     this.broadcastChannel = new BroadcastChannel('llm_chat_messages');
     
-    // Listen for messages from background script
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      console.log("LLM Recorder: Received message", message.action);
       if (message.action === "startSelection") {
         this.startSelectionMode();
+        sendResponse({ status: "selection_started" });
       } else if (message.action === "stopRecording") {
         this.stopRecording();
+        sendResponse({ status: "recording_stopped" });
       }
       return true;
     });
     
-    // Listen for selection events
-    document.addEventListener('selectionchange', this.handleSelectionChange.bind(this));
+    document.addEventListener('click', (e) => this.handleInitialClick(e), true);
   }
   
-  // Start selection mode - show hint and wait for user to select text
+  handleInitialClick(event) {
+    if (this.recording || !this.selectionHint) return;
+    
+    console.log("LLM Recorder: Click detected on:", event.target);
+    event.preventDefault();
+    event.stopPropagation();
+    
+    const container = this.findStableAnchor(event.target);
+    
+    if (container) {
+      console.log("LLM Recorder: SUCCESS! Container found.");
+      this.container = container;
+      this.startRecording();
+    } else {
+      console.warn("LLM Recorder: Clicked, but couldn't find container.");
+    }
+  }
+  
+  // FIXED ALGORITHM - Finds container with most messages
+  findStableAnchor(startingNode) {
+    console.log("🔍 FINDING CHAT CONTAINER");
+    
+    let current = startingNode.nodeType === 1 ? startingNode : startingNode.parentElement;
+    let bestContainer = null;
+    let maxMessages = 0;
+    
+    // Check 12 parent levels
+    for (let level = 0; level < 12 && current; level++) {
+      const parent = current.parentElement;
+      if (!parent) break;
+      
+      // Count ALL divs with message-like text in parent's subtree
+      const allDivs = parent.querySelectorAll('div');
+      let messageCount = 0;
+      
+      allDivs.forEach(div => {
+        const text = (div.textContent || "").trim();
+        if (text.length > 30 && text.length < 3000) {
+          messageCount++;
+        }
+      });
+      
+      console.log(`${parent.className || parent.tagName}: ${messageCount} messages`);
+      
+      if (messageCount > maxMessages) {
+        maxMessages = messageCount;
+        bestContainer = parent;
+      }
+      
+      current = parent;
+    }
+    
+    if (bestContainer && maxMessages >= 2) {
+      console.log(`✅ Found: ${bestContainer.className} with ${maxMessages} messages`);
+      return bestContainer;
+    }
+    
+    console.log("❌ No chat container found");
+    return null;
+  }
+  
+  // Selection mode methods
   startSelectionMode() {
     this.showSelectionHint();
     this.recording = false;
@@ -46,7 +107,6 @@ class LLMChatRecorder {
     this.selectionHint.textContent = 'Click on any chat message to start recording';
     document.body.appendChild(this.selectionHint);
     
-    // Auto-remove after 10 seconds
     setTimeout(() => {
       if (this.selectionHint) {
         this.selectionHint.remove();
@@ -55,156 +115,48 @@ class LLMChatRecorder {
     }, 10000);
   }
   
-  // Handle text selection
-  handleSelectionChange() {
-    if (!this.recording && this.selectionHint) {
-      const selection = window.getSelection();
-      if (selection && selection.rangeCount > 0 && selection.toString().trim()) {
-        const range = selection.getRangeAt(0);
-        const startNode = range.startContainer;
-        
-        // Find container using the algorithm
-        const container = this.findStableAnchor(startNode);
-        
-        if (container) {
-          this.container = container;
-          this.startRecording();
-          
-          // Remove selection hint
-          if (this.selectionHint) {
-            this.selectionHint.remove();
-            this.selectionHint = null;
-          }
-        }
-      }
-    }
-  }
-  
-  // Your algorithm implementation
-  findStableAnchor(startingNode) {
-    // 1. Move up to the first <div> ancestor
-    let element = startingNode.nodeType === 1 ? startingNode : startingNode.parentElement;
-    
-    while (element && element !== document.body && element.tagName !== 'DIV') {
-      element = element.parentElement;
-    }
-    
-    if (!element || element === document.body || element.tagName !== 'DIV') {
-      console.log('LLM Recorder: No suitable div found');
-      return null;
-    }
-    
-    // Now, 'element' is the Initial Div Container (D1)
-    const maxWalkDepth = 20; // Safety limit
-    
-    // 2. Walk Up, checking only <div> parents for repetition
-    for (let i = 0; i < maxWalkDepth; i++) {
-      let potentialMessageContainer = element.parentElement;
-      
-      // Find the next <div> ancestor to test
-      while (potentialMessageContainer && 
-             potentialMessageContainer !== document.body && 
-             potentialMessageContainer.tagName !== 'DIV') {
-        potentialMessageContainer = potentialMessageContainer.parentElement;
-      }
-      
-      if (!potentialMessageContainer || potentialMessageContainer === document.body) {
-        return null; // Hit the top
-      }
-      
-      // 3. Test for Repetition
-      const repeatingSibling = this.findRepetitiveSibling(potentialMessageContainer);
-      
-      if (repeatingSibling) {
-        // Found the Message Container
-        const chatLogContainer = potentialMessageContainer.parentElement;
-        console.log('LLM Recorder: Found container', chatLogContainer);
-        return chatLogContainer;
-      }
-      
-      // Move up to the next <div> ancestor
-      element = potentialMessageContainer;
-    }
-    
-    return null;
-  }
-  
-  findRepetitiveSibling(div) {
-    // Look for sibling divs with similar structure
-    // This is a simplified version - you may need to adjust
-    if (!div.parentElement) return null;
-    
-    const siblings = Array.from(div.parentElement.children).filter(
-      child => child.tagName === 'DIV' && child !== div
-    );
-    
-    // Check if any sibling has similar class structure
-    for (const sibling of siblings) {
-      if (this.areElementsSimilar(div, sibling)) {
-        return sibling;
-      }
-    }
-    
-    return null;
-  }
-  
-  areElementsSimilar(el1, el2) {
-    // Compare classes, data attributes, etc.
-    const classes1 = el1.className.split(' ').sort();
-    const classes2 = el2.className.split(' ').sort();
-    
-    // If both have classes and share some
-    if (classes1.length > 0 && classes2.length > 0) {
-      const common = classes1.filter(c => classes2.includes(c));
-      return common.length > 0;
-    }
-    
-    // Or compare children structure
-    return el1.children.length === el2.children.length;
-  }
-  
-  // Start recording on the found container
+  // Recording methods
   startRecording() {
-    if (!this.container || this.recording) return;
+    if (!this.container) return;
     
     this.recording = true;
-    
-    // Add visual outline
     this.container.classList.add('llm-recorder-outline');
+    this.container.style.outline = "5px dashed blue";
+    this.container.style.padding = "10px";
     
-    // Notify background script
-    chrome.runtime.sendMessage({ 
-      action: "recordingStarted",
-      containerFound: true 
+    this.observer = new MutationObserver((mutations) => {
+      mutations.forEach(mutation => {
+        mutation.addedNodes.forEach(node => {
+          if (node.nodeType === 1) {
+            console.log("LLM Recorder: New message detected!");
+            this.startMonitoringMessage(node);
+          }
+        });
+      });
     });
     
-    // Start observing for new messages
-    this.startObserving();
-    
-    console.log('LLM Recorder: Started recording');
+    this.observer.observe(this.container, { childList: true });
   }
   
   stopRecording() {
     this.recording = false;
     
-    // Remove visual outline
     if (this.container) {
       this.container.classList.remove('llm-recorder-outline');
+      this.container.style.outline = "";
+      this.container.style.padding = "";
     }
     
-    // Stop observing
     if (this.observer) {
       this.observer.disconnect();
       this.observer = null;
     }
     
-    // Clear streaming timeouts
     this.streamingMessages.forEach(data => {
       if (data.timeoutId) clearTimeout(data.timeoutId);
     });
     this.streamingMessages.clear();
     
-    // Remove selection hint if present
     if (this.selectionHint) {
       this.selectionHint.remove();
       this.selectionHint = null;
@@ -213,182 +165,128 @@ class LLMChatRecorder {
     console.log('LLM Recorder: Stopped recording');
   }
   
-  startObserving() {
-    if (!this.container || this.observer) return;
-    
-    this.observer = new MutationObserver((mutations) => {
-      mutations.forEach((mutation) => {
-        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-          this.handleNewNodes(mutation.addedNodes);
-        }
-      });
-    });
-    
-    // Observe only the container for new children
-    this.observer.observe(this.container, {
-      childList: true,
-      subtree: true
-    });
-  }
-  
-  handleNewNodes(nodes) {
-    Array.from(nodes).forEach(node => {
-      if (node.nodeType === 1) { // Element node
-        // Check if this looks like a message container
-        if (this.isMessageContainer(node)) {
-          this.startMonitoringMessage(node);
-        }
-        
-        // Also check children
-        if (node.querySelectorAll) {
-          node.querySelectorAll('*').forEach(child => {
-            if (this.isMessageContainer(child)) {
-              this.startMonitoringMessage(child);
-            }
-          });
-        }
-      }
-    });
-  }
-  
-  isMessageContainer(element) {
-    // Heuristic: look for elements that might contain chat messages
-    const text = element.textContent || '';
-    const hasReasonableLength = text.length > 10 && text.length < 10000;
-    const hasCommonClasses = ['message', 'chat', 'content', 'text', 'assistant', 'user']
-      .some(word => element.className.toLowerCase().includes(word));
-    
-    return hasReasonableLength && (hasCommonClasses || element.children.length === 0);
-  }
-  
   startMonitoringMessage(messageDiv) {
-    const messageId = Math.random().toString(36).substr(2, 9);
+    console.log("LLM Recorder: Monitoring message for completion...");
     
-    // Initial extract
-    const initialText = this.extractMessageText(messageDiv);
-    const sender = this.inferSender(messageDiv);
+    let stabilityTimer = null;
+    let lastLength = 0;
+    const QUIET_PERIOD = 2000;
     
-    // Store in streaming map
-    this.streamingMessages.set(messageDiv, {
-      id: messageId,
-      text: initialText,
-      sender: sender,
-      lastUpdate: Date.now(),
-      timeoutId: null
-    });
-    
-    // Watch for changes in this message (streaming)
-    const textObserver = new MutationObserver(() => {
-      const data = this.streamingMessages.get(messageDiv);
-      if (data) {
-        data.text = this.extractMessageText(messageDiv);
-        data.lastUpdate = Date.now();
-        
-        // Reset timeout
-        if (data.timeoutId) clearTimeout(data.timeoutId);
-        
-        // Set new timeout (1.5 seconds after last change)
-        data.timeoutId = setTimeout(() => {
-          this.broadcastMessage(data);
-          this.streamingMessages.delete(messageDiv);
-          textObserver.disconnect();
-        }, 1500);
+    const checkCompletion = () => {
+      const currentText = this.extractPlainTextMessage(messageDiv);
+      const currentLength = currentText.length;
+      
+      const isStillGenerating = messageDiv.querySelector('.generating, .loading, .typing, [aria-busy="true"]');
+      
+      if (isStillGenerating) {
+        console.log("LLM Recorder: Still generating...");
+        return;
       }
+      
+      if (currentLength === lastLength && currentLength > 0) {
+        console.log("LLM Recorder: Text stabilized.");
+        this.finalizeMessage(messageDiv, currentText);
+      } else {
+        lastLength = currentLength;
+      }
+    };
+    
+    const completionObserver = new MutationObserver(() => {
+      clearTimeout(stabilityTimer);
+      stabilityTimer = setTimeout(checkCompletion, QUIET_PERIOD);
     });
     
-    textObserver.observe(messageDiv, {
+    completionObserver.observe(messageDiv, {
       childList: true,
       subtree: true,
       characterData: true
     });
     
-    // Also set an initial timeout in case no changes happen
-    const data = this.streamingMessages.get(messageDiv);
-    data.timeoutId = setTimeout(() => {
-      this.broadcastMessage(data);
-      this.streamingMessages.delete(messageDiv);
-      textObserver.disconnect();
-    }, 1500);
+    messageDiv._completionObserver = completionObserver;
   }
   
-  extractMessageText(element) {
-    // Get text content but preserve formatting markers
-    let text = '';
+  extractPlainTextMessage(element) {
+    const clone = element.cloneNode(true);
     
-    // Use a recursive function to walk the DOM
-    const walk = (node) => {
-      if (node.nodeType === 3) { // Text node
-        text += node.textContent || '';
-      } else if (node.nodeType === 1) { // Element node
-        // Preserve important formatting indicators
-        const tag = node.tagName.toLowerCase();
-        if (tag === 'code' || tag === 'pre') {
-          text += '```' + (node.textContent || '') + '```';
-        } else if (tag === 'strong' || tag === 'b') {
-          text += '**' + (node.textContent || '') + '**';
-        } else if (tag === 'em' || tag === 'i') {
-          text += '*' + (node.textContent || '') + '*';
-        } else {
-          // Recurse through children
-          Array.from(node.childNodes).forEach(walk);
-        }
+    clone.querySelectorAll('i, em').forEach(el => {
+      const text = el.textContent.trim();
+      if (text && !text.startsWith('*')) el.textContent = `*${text}*`;
+    });
+    
+    clone.querySelectorAll('b, strong').forEach(el => {
+      const text = el.textContent.trim();
+      if (text && !text.startsWith('**')) el.textContent = `**${text}**`;
+    });
+    
+    clone.querySelectorAll('p, div, br').forEach(el => {
+      if (el.tagName === 'BR') {
+        el.after('\n');
+      } else {
+        el.prepend('\n');
+        el.append('\n');
       }
+    });
+    
+    return clone.textContent
+      .replace(/\n\s*\n/g, '\n\n')
+      .trim();
+  }
+  
+  finalizeMessage(messageDiv, finalRawText) {
+    if (messageDiv._completionObserver) {
+      messageDiv._completionObserver.disconnect();
+    }
+    
+    const payload = {
+      action: "new_completed_message",
+      sender: this.inferSender(messageDiv),
+      text: finalRawText,
+      timestamp: new Date().toISOString()
     };
     
-    walk(element);
-    
-    // Clean up excessive whitespace but preserve intentional line breaks
-    text = text.replace(/\s+/g, ' ').trim();
-    return text;
+    console.log(payload);
+    this.broadcastChannel.postMessage(payload);
   }
   
   inferSender(messageDiv) {
-    // Try to infer sender from various clues
-    
-    // 1. Check classes
-    const className = (messageDiv.className || '').toLowerCase();
-    if (className.includes('user') || className.includes('human')) return 'user';
-    if (className.includes('assistant') || className.includes('ai') || className.includes('bot')) return 'assistant';
-    if (className.includes('system')) return 'system';
-    
-    // 2. Check data attributes
-    if (messageDiv.hasAttribute('data-role')) {
-      const role = messageDiv.getAttribute('data-role').toLowerCase();
-      if (role.includes('user')) return 'user';
-      if (role.includes('assistant') || role.includes('ai')) return 'assistant';
+    const nameElement = messageDiv.querySelector('[class*="name"], [class*="author"], [class*="user-label"]');
+    if (nameElement && nameElement.textContent) {
+      return nameElement.textContent.trim();
     }
     
-    // 3. Check parent classes
-    let parent = messageDiv.parentElement;
-    for (let i = 0; i < 3 && parent; i++) {
-      const parentClass = (parent.className || '').toLowerCase();
-      if (parentClass.includes('user')) return 'user';
-      if (parentClass.includes('assistant') || parentClass.includes('ai')) return 'assistant';
-      parent = parent.parentElement;
-    }
+    const ariaLabel = messageDiv.getAttribute('aria-label');
+    if (ariaLabel) return ariaLabel;
     
-    // 4. Fallback: alternate messages (very rough guess)
-    const allMessages = Array.from(this.container.querySelectorAll('*'))
-      .filter(el => this.isMessageContainer(el));
-    const index = allMessages.indexOf(messageDiv);
-    return index % 2 === 0 ? 'user' : 'assistant';
+    const rawClass = messageDiv.className.toLowerCase();
+    if (rawClass.includes('user')) return "User";
+    if (rawClass.includes('assistant') || rawClass.includes('model')) return "AI";
+    
+    return "Unknown";
   }
   
-  broadcastMessage(data) {
-    if (!data.text || data.text.trim().length === 0) return;
+  showToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.style.cssText = `
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: ${type === 'error' ? '#f44336' : 
+                   type === 'success' ? '#4CAF50' : '#2196F3'};
+      color: white;
+      padding: 12px 20px;
+      border-radius: 6px;
+      z-index: 999999;
+      font-family: sans-serif;
+      font-size: 14px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    `;
     
-    const message = {
-      type: "llm_chat_message",
-      version: "1.0",
-      timestamp: Date.now(),
-      sender: data.sender,
-      text: data.text,
-      source: this.getSourceFromDomain(),
-      streamed: true
-    };
+    toast.textContent = message;
+    document.body.appendChild(toast);
     
-    console.log('LLM Recorder: Broadcasting message', message);
-    this.broadcastChannel.postMessage(message);
+    setTimeout(() => {
+      if (toast.parentNode) toast.remove();
+    }, 3000);
   }
   
   getSourceFromDomain() {
@@ -403,14 +301,9 @@ class LLMChatRecorder {
   }
 }
 
-// Initialize the recorder when page loads
+// Initialize
 let recorder = null;
 
-document.addEventListener('DOMContentLoaded', () => {
-  recorder = new LLMChatRecorder();
-});
-
-// Also initialize if script loads after DOMContentLoaded
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
     recorder = new LLMChatRecorder();

@@ -5,65 +5,45 @@ let recordingState = {
   awaitingSelection: false
 };
 
-// Icon colors for different states
 const ICON_COLORS = {
-  INACTIVE: { color: [128, 128, 128, 255] },  // Gray
-  AWAITING_SELECTION: { color: [255, 255, 0, 255] },  // Yellow
-  RECORDING: { color: [0, 255, 0, 255] }  // Green
+  INACTIVE: { color: [128, 128, 128, 255], text: "" },
+  AWAITING_SELECTION: { color: [255, 255, 0, 255], text: "?" },
+  RECORDING: { color: [0, 255, 0, 255], text: "●" }
 };
 
-// Update the extension icon
 async function updateIcon(tabId, state) {
   try {
-    await chrome.action.setIcon({
-      tabId: tabId,
-      path: {
-        "16": "icons/icon16.png",
-        "48": "icons/icon48.png",
-        "128": "icons/icon128.png"
-      }
-    });
-    
-    await chrome.action.setBadgeBackgroundColor({
-      tabId: tabId,
-      color: state.color
-    });
-    
-    await chrome.action.setBadgeText({
-      tabId: tabId,
-      text: state === ICON_COLORS.RECORDING ? "●" : ""
-    });
-  } catch (error) {
-    console.error("Error updating icon:", error);
-  }
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: state.color });
+    await chrome.action.setBadgeText({ tabId, text: state.text });
+  } catch (e) { console.error(e); }
 }
 
 // Handle browser action clicks
 chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('about:')) {
-    return;
-  }
+  if (tab.url?.startsWith('chrome://')) return;
 
-  if (recordingState.activeTabId === tab.id && recordingState.isRecording) {
-    // Stop recording
-    recordingState.isRecording = false;
-    recordingState.awaitingSelection = false;
-    recordingState.activeTabId = null;
-    
+  if (recordingState.activeTabId === tab.id && (recordingState.isRecording || recordingState.awaitingSelection)) {
+    // STOP LOGIC
+    recordingState = { activeTabId: null, isRecording: false, awaitingSelection: false };
     await updateIcon(tab.id, ICON_COLORS.INACTIVE);
     
-    // Send stop command to content script
-    await chrome.tabs.sendMessage(tab.id, { action: "stopRecording" });
-    
-  } else if (!recordingState.isRecording) {
-    // Start recording process
+    // Catch potential "receiving end does not exist"
+    try {
+      await chrome.tabs.sendMessage(tab.id, { action: "stopRecording" });
+    } catch(e) { console.log("Tab closed or script not injected."); }
+
+  } else {
+    // START LOGIC
     recordingState.awaitingSelection = true;
     recordingState.activeTabId = tab.id;
-    
     await updateIcon(tab.id, ICON_COLORS.AWAITING_SELECTION);
     
-    // Send start selection command to content script
-    await chrome.tabs.sendMessage(tab.id, { action: "startSelection" });
+    try {
+      await chrome.tabs.sendMessage(tab.id, { action: "startSelection" });
+    } catch(e) { 
+      console.error("Content script not ready. Refreshing tab...");
+      await chrome.tabs.reload(tab.id);
+    }
   }
 });
 
@@ -90,4 +70,15 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.runtime.onInstalled.addListener(() => {
   // Set default icon state
   chrome.action.setBadgeText({ text: "" });
+});
+
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "recordingStarted") {
+    recordingState.isRecording = true;
+    recordingState.awaitingSelection = false;
+    updateIcon(sender.tab.id, ICON_COLORS.RECORDING);
+    sendResponse({ status: "acknowledged" });
+  }
+  return true; 
 });
