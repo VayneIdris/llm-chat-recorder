@@ -322,44 +322,56 @@ class LLMChatRecorder {
     console.log("👀 STARTING MESSAGE MONITOR");
     console.log("Div classes:", messageDiv.className);
     console.log("Text preview:", (messageDiv.textContent || "").substring(0, 100));
-    
+
     // Skip if already monitoring
     const messageId = this.getMessageId(messageDiv);
     if (this.streamingMessages.has(messageId)) {
       console.log("Already monitoring this message");
       return;
     }
-    
+
+    const speaker = this.getSpeakerInfo(messageDiv);
+    const isUserMessage = speaker.role === 'user';
+
+    // User messages don't stream, capture them immediately for the API
+    if (isUserMessage) {
+      console.log(`👤 Capturing user message from ${speaker.name}`);
+      const text = this.extractPlainTextMessage(messageDiv);
+      this.captureMessage(messageDiv, text, speaker, false);
+      return;
+    }
+
     let checkCount = 0;
     const MAX_CHECKS = 15;
-    
+
     const checkAndCapture = () => {
       checkCount++;
-      
+
       const text = this.extractPlainTextMessage(messageDiv);
       const currentLength = text.length;
-      
+
       console.log(`🔍 Check ${checkCount}/${MAX_CHECKS}: Length = ${currentLength}`);
-      
+
       // Check if message is complete
       const isComplete = this.isMessageComplete(messageDiv, text);
-      
+
       if (isComplete || checkCount >= MAX_CHECKS) {
         console.log("✅ Message complete! Capturing...");
-        this.captureMessage(messageDiv, text);
+        this.captureMessage(messageDiv, text, speaker, true);
         this.streamingMessages.delete(messageId);
       } else {
         // Schedule next check
         setTimeout(checkAndCapture, 1000);
       }
     };
-    
+
     // Store monitoring state
     this.streamingMessages.set(messageId, {
       startTime: Date.now(),
-      lastCheck: Date.now()
+      lastCheck: Date.now(),
+      speaker
     });
-    
+
     // Start checking
     setTimeout(checkAndCapture, 1500);
   }
@@ -383,28 +395,29 @@ class LLMChatRecorder {
     return endsWithCompleteThought;
   }
   
-  captureMessage(messageDiv, text) {
+  captureMessage(messageDiv, text, speaker, streamed) {
     console.log("💬 CAPTURING FINAL MESSAGE");
     console.log("Length:", text.length);
     console.log("Preview:", text.substring(0, 150));
-    
+
     const payload = {
       action: "new_completed_message",
-      sender: this.inferSender(messageDiv),
+      sender: speaker.role,
+      speaker: speaker.name,
       text: text,
       timestamp: new Date().toISOString(),
-      source: window.location.hostname
+      source: this.inferSource(messageDiv),
+      streamed
     };
-    
+
     // Log to console
-    console.log("📤 MESSAGE CAPTURED:");
-    console.log("From:", payload.sender);
+    console.log(`📤 ${speaker.role.toUpperCase()} MESSAGE CAPTURED from ${speaker.name}`);
     console.log("Text:", payload.text);
     console.log("---");
-    
+
     // Send via broadcast channel
     this.broadcastChannel.postMessage(payload);
-    
+
     // Visual feedback
     messageDiv.style.backgroundColor = 'rgba(76, 175, 80, 0.2)';
     setTimeout(() => {
@@ -440,20 +453,52 @@ class LLMChatRecorder {
       .trim();
   }
   
-  inferSender(messageDiv) {
-    const nameElement = messageDiv.querySelector('[class*="name"], [class*="author"], [class*="user-label"]');
-    if (nameElement && nameElement.textContent) {
-      return nameElement.textContent.trim();
-    }
-    
-    const ariaLabel = messageDiv.getAttribute('aria-label');
-    if (ariaLabel) return ariaLabel;
-    
-    const rawClass = messageDiv.className.toLowerCase();
-    if (rawClass.includes('user')) return "User";
-    if (rawClass.includes('assistant') || rawClass.includes('model')) return "AI";
-    
-    return "Unknown";
+  getSpeakerInfo(messageDiv) {
+    const explicitRole = (messageDiv.getAttribute('data-role') || messageDiv.getAttribute('data-message-author-role') || '').toLowerCase();
+    const classNames = (messageDiv.className || '').toLowerCase();
+    const ariaLabel = (messageDiv.getAttribute('aria-label') || '').toLowerCase();
+
+    const role = (() => {
+      if (explicitRole.includes('user')) return 'user';
+      if (explicitRole.includes('assistant') || explicitRole.includes('model')) return 'assistant';
+      if (ariaLabel.includes('you') || classNames.includes('user')) return 'user';
+      if (classNames.includes('assistant') || classNames.includes('model')) return 'assistant';
+      return 'unknown';
+    })();
+
+    const nameElement = messageDiv.querySelector('[class*="name"], [class*="author"], [class*="user-label"], [data-username], [data-sender], [data-author]');
+    const explicitName = nameElement?.textContent?.trim() ||
+      messageDiv.getAttribute('data-username') ||
+      messageDiv.getAttribute('data-sender') ||
+      messageDiv.getAttribute('data-author') ||
+      messageDiv.getAttribute('data-model-name');
+
+    const fallbackName = (() => {
+      if (role === 'user') return 'User';
+      if (role === 'assistant') return 'Assistant';
+      return 'Unknown';
+    })();
+
+    return {
+      role,
+      name: (explicitName || ariaLabel || '').trim() || fallbackName
+    };
+  }
+
+  inferSource(messageDiv) {
+    const sourceAttr = messageDiv.getAttribute('data-source') ||
+      messageDiv.getAttribute('data-model') ||
+      messageDiv.getAttribute('data-provider');
+
+    if (sourceAttr) return sourceAttr;
+
+    const classNames = (messageDiv.className || '').toLowerCase();
+    if (classNames.includes('claude')) return 'claude';
+    if (classNames.includes('gpt') || classNames.includes('chatgpt')) return 'chatgpt';
+    if (classNames.includes('gemini')) return 'gemini';
+    if (classNames.includes('deepseek')) return 'deepseek';
+
+    return window.location.hostname;
   }
   
   stopRecording() {
